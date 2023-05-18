@@ -127,8 +127,7 @@ func getNestedMethod(val reflect.Value, methodName string) (reflect.Method, bool
 	return reflect.PtrTo(typ).MethodByName(methodName)
 }
 
-// GetGoroutineId ...
-// Deprecated
+// GetGoroutineId gets the current goroutineId.
 func GetGoroutineId() int64 {
 	return tool.GetGoroutineID()
 }
