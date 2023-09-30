@@ -79,6 +79,22 @@ func MockUnsafe(target interface{}) *MockBuilder {
 	return Mock(target, OptUnsafe)
 }
 
+func (builder *MockBuilder) hookType() reflect.Type {
+	targetType := reflect.TypeOf(builder.target)
+	if builder.generic {
+		targetIn := []reflect.Type{genericInfoType}
+		for i := 0; i < targetType.NumIn(); i++ {
+			targetIn = append(targetIn, targetType.In(i))
+		}
+		targetOut := []reflect.Type{}
+		for i := 0; i < targetType.NumOut(); i++ {
+			targetOut = append(targetOut, targetType.Out(i))
+		}
+		return reflect.FuncOf(targetIn, targetOut, targetType.IsVariadic())
+	}
+	return targetType
+}
+
 func (builder *MockBuilder) resetCondition() *MockBuilder {
 	builder.conditions = []*mockCondition{builder.newCondition()} // at least 1 condition is needed
 	return builder
@@ -187,15 +203,15 @@ func (builder *MockBuilder) Build() *Mocker {
 	return &mocker
 }
 
-func (mocker *Mocker) checkReceiver(target reflect.Type, hook interface{}) bool {
+func (mocker *Mocker) missReceiver(target reflect.Type, hook interface{}) bool {
 	hType := reflect.TypeOf(hook)
 	tool.Assert(hType.Kind() == reflect.Func, "Param(%v) a is not a func", hType.Kind())
 	tool.Assert(target.IsVariadic() == hType.IsVariadic(), "target:%v, hook:%v args not match", target, hook)
 	// has receiver
-	if tool.CheckFuncArgs(target, hType, 0) {
+	if tool.CheckFuncArgs(target, hType, 0, 0) {
 		return false
 	}
-	if tool.CheckFuncArgs(target, hType, 1) {
+	if tool.CheckFuncArgs(target, hType, 1, 0) {
 		return true
 	}
 	tool.Assert(false, "target:%v, hook:%v args not match", target, hook)
@@ -205,40 +221,36 @@ func (mocker *Mocker) checkReceiver(target reflect.Type, hook interface{}) bool 
 func (mocker *Mocker) buildHook() {
 	proxySetter := mocker.buildProxy()
 
-	origin := reflect.ValueOf(mocker.proxy).Elem()
 	originExec := func(args []reflect.Value) []reflect.Value {
-		return tool.ReflectCall(origin, args)
+		return tool.ReflectCall(reflect.ValueOf(mocker.proxy).Elem(), args)
 	}
 
 	match := []func(args []reflect.Value) bool{}
 	exec := []func(args []reflect.Value) []reflect.Value{}
 
-	for _, condition := range mocker.builder.conditions {
-		when := condition.when
-		hook := condition.hook
-
-		if when == nil {
+	for i := range mocker.builder.conditions {
+		condition := mocker.builder.conditions[i]
+		if condition.when == nil {
 			// when condition is not set, just go into hook exec
 			match = append(match, func(args []reflect.Value) bool { return true })
 		} else {
-			missWhenReceiver := mocker.checkReceiver(mocker.target.Type(), when)
 			match = append(match, func(args []reflect.Value) bool {
-				return tool.ReflectCallWithShiftOne(reflect.ValueOf(when), args, missWhenReceiver)[0].Bool()
+				return tool.ReflectCall(reflect.ValueOf(condition.when), args)[0].Bool()
 			})
 		}
 
-		if hook == nil {
+		if condition.hook == nil {
+			// hook condition is not set, just go into original exec
 			exec = append(exec, originExec)
 		} else {
-			missHookReceiver := mocker.checkReceiver(mocker.target.Type(), hook)
 			exec = append(exec, func(args []reflect.Value) []reflect.Value {
 				mocker.mock()
-				return tool.ReflectCallWithShiftOne(reflect.ValueOf(hook), args, missHookReceiver)
+				return tool.ReflectCall(reflect.ValueOf(condition.hook), args)
 			})
 		}
 	}
 
-	mockerHook := reflect.MakeFunc(mocker.target.Type(), func(args []reflect.Value) []reflect.Value {
+	mockerHook := reflect.MakeFunc(mocker.builder.hookType(), func(args []reflect.Value) []reflect.Value {
 		proxySetter(args) // 设置origin调用proxy
 
 		mocker.access()
@@ -267,29 +279,27 @@ func (mocker *Mocker) buildHook() {
 	mocker.hook = mockerHook
 }
 
+// buildProx create a porxyCaller which could call origin directly
 func (mocker *Mocker) buildProxy() func(args []reflect.Value) {
-	proxy := reflect.New(mocker.target.Type())
+	proxy := reflect.New(mocker.builder.hookType())
 
 	proxyCallerSetter := func(args []reflect.Value) {}
-	missProxyReceiver := false
 	if mocker.builder.proxyCaller != nil {
 		pVal := reflect.ValueOf(mocker.builder.proxyCaller)
 		tool.Assert(pVal.Kind() == reflect.Ptr && pVal.Elem().Kind() == reflect.Func, "origin receiver must be a function pointer")
 		pElem := pVal.Elem()
-		missProxyReceiver = mocker.checkReceiver(mocker.target.Type(), pElem.Interface())
 
-		if missProxyReceiver {
-			proxyCallerSetter = func(args []reflect.Value) {
-				pElem.Set(reflect.MakeFunc(pElem.Type(), func(innerArgs []reflect.Value) (results []reflect.Value) {
-					return tool.ReflectCall(proxy.Elem(), append(args[0:1], innerArgs...))
-				}))
-			}
-		} else {
-			proxyCallerSetter = func(args []reflect.Value) {
-				pElem.Set(reflect.MakeFunc(pElem.Type(), func(innerArgs []reflect.Value) (results []reflect.Value) {
-					return tool.ReflectCall(proxy.Elem(), innerArgs)
-				}))
-			}
+		shift := 0
+		if mocker.builder.generic {
+			shift += 1
+		}
+		if mocker.missReceiver(mocker.target.Type(), pElem.Interface()) {
+			shift += 1
+		}
+		proxyCallerSetter = func(args []reflect.Value) {
+			pElem.Set(reflect.MakeFunc(pElem.Type(), func(innerArgs []reflect.Value) (results []reflect.Value) {
+				return tool.ReflectCall(proxy.Elem(), append(args[0:shift], innerArgs...))
+			}))
 		}
 	}
 	mocker.proxy = proxy.Interface()

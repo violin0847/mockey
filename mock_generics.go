@@ -16,6 +16,21 @@
 
 package mockey
 
+import (
+	"reflect"
+	"unsafe"
+)
+
 func MockGeneric(target interface{}) *MockBuilder {
 	return Mock(target, OptGeneric)
+}
+
+type GenericInfo uintptr
+
+var genericInfoType = reflect.TypeOf(GenericInfo(0))
+
+func (g GenericInfo) TypeOfUsedArgN(n uintptr) reflect.Type {
+	var vt interface{}
+	*(*uintptr)(unsafe.Pointer(&vt)) = *(*uintptr)(unsafe.Pointer(uintptr(g) + 8*n))
+	return reflect.TypeOf(vt)
 }
